@@ -446,6 +446,7 @@ def make_eu_oem_charts(dff):
 # ─────────────────────────────────────────────────────────────
 app = dash.Dash(__name__, title="Vaayushanti Sales Dashboard",
                 suppress_callback_exceptions=True)
+server = app.server
 
 app.index_string = """<!DOCTYPE html><html><head>
 {%metas%}<title>{%title%}</title>{%favicon%}{%css%}
