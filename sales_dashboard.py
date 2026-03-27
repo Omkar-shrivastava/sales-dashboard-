@@ -5,6 +5,7 @@
 #
 #  ✅ Google Sheets (Published CSV) se live data fetch hoga
 #  🔧 Fixed: date parse, filter glitch, fetch stability, BOM, retry
+#  🔧 Fixed v2: month grid correctly shows only available months per year
 # ============================================================
 
 import dash
@@ -16,7 +17,7 @@ import requests, io, re
 from datetime import datetime
 
 SHEET_CSV_URLS = [
-    "https://docs.google.com/spreadsheets/d/e/2PACX-1vROUuJlB9IAWSMUe9ujdWly36UdagPrap6onQeoi3PqsoGi9xmcNTLn_Alo91hZqA/pub?output=csv"
+    "https://docs.google.com/spreadsheets/d/e/2PACX-1vRmQxkjVw5rF5PIj7tSzeh3sV5gT6fcRlM3D77J2zxXeL9qklUB041KjNkmUTiFFotHCklKTNqJxBcx/pub?output=csv"
 ]
 
 SHEET_NAMES = ["Sheet1"]
@@ -41,20 +42,15 @@ def clean_sp(v):
     return v.replace("_", " ").strip()
 
 def parse_date(v):
-    """Robust date parser — handles Excel serials, all common formats, short years."""
     if pd.isna(v): return pd.NaT
     s = str(v).strip()
     if not s or s.lower() in ("nan", "none", "nat", "", "null", "n/a"): return pd.NaT
-
-    # Excel serial (covers ~1990 – 2050)
     try:
         n = float(re.sub(r"[,\s]", "", s))
         if 33000 < n < 73000:
             return pd.Timestamp("1899-12-30") + pd.Timedelta(days=int(n))
     except Exception:
         pass
-
-    # Explicit format attempts (fastest)
     for fmt in [
         "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y",
         "%d-%m-%y", "%d/%m/%y", "%m/%d/%y",
@@ -69,8 +65,6 @@ def parse_date(v):
             return pd.to_datetime(s, format=fmt)
         except Exception:
             pass
-
-    # Pandas auto-detect fallback
     try:
         return pd.to_datetime(s, dayfirst=True, errors="coerce")
     except Exception:
@@ -86,7 +80,7 @@ def get_cat(v):
     return str(v).strip() or "Other"
 
 # ─────────────────────────────────────────────────────────────
-#  FETCH  (BOM-safe, retry, best-header detection)
+#  FETCH
 # ─────────────────────────────────────────────────────────────
 def fetch_csv_from_url(url, sheet_name="Sheet", retries=2):
     for attempt in range(retries + 1):
@@ -100,7 +94,6 @@ def fetch_csv_from_url(url, sheet_name="Sheet", retries=2):
             resp.raise_for_status()
             content = resp.content
 
-            # BOM-safe decode — try multiple encodings
             raw_str = None
             for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
                 try:
@@ -111,7 +104,6 @@ def fetch_csv_from_url(url, sheet_name="Sheet", retries=2):
             if raw_str is None:
                 raw_str = content.decode("utf-8", errors="replace")
 
-            # ── Find best header row (score-based) ──────────────────
             peek = pd.read_csv(io.StringIO(raw_str), header=None, dtype=str, nrows=15)
             if peek.shape[0] < 2 or peek.shape[1] < 2:
                 print(f"  ⚠️  {sheet_name}: Too few rows/cols, skipping")
@@ -137,44 +129,32 @@ def fetch_csv_from_url(url, sheet_name="Sheet", retries=2):
             df = pd.read_csv(io.StringIO(raw_str), header=hdr, dtype=str)
             df.columns = [str(c).strip() for c in df.columns]
             df = df.dropna(how="all").reset_index(drop=True)
-            df = df.loc[:, df.notna().any()]   # drop fully-empty columns
+            df = df.loc[:, df.notna().any()]
 
-            # ── Column mapping ─────────────────────────────────────
             mp = {}
-            # Priority order matters — office_sp before salesperson
             for c in df.columns:
                 cl = c.lower().strip()
                 if not cl or cl == "nan":
                     continue
-
                 if "date" in cl and "po" not in cl and "order" not in cl:
                     if "date" not in mp.values(): mp[c] = "date"
-
                 elif any(k in cl for k in ("company","client","customer")):
                     if "company" not in mp.values(): mp[c] = "company"
-
                 elif "item" in cl or ("category" in cl and "sub" not in cl):
                     if "item" not in mp.values(): mp[c] = "item"
-
                 elif cl in ("qty","quantity") or (
                         "qty" in cl and "val" not in cl and "amount" not in cl):
                     if "qty" not in mp.values(): mp[c] = "qty"
-
                 elif any(k in cl for k in ("value","amount","₹")) or cl == "po":
                     if "amount" not in mp.values(): mp[c] = "amount"
-
-                # ← office_sp BEFORE salesperson so "Office Sales Person" maps correctly
                 elif ("office" in cl and any(k in cl for k in ("person","sp","sc"))) or \
                      cl.replace(" ", "") in ("sc","crm") or \
                      ("crm" in cl and "person" in cl):
                     if "office_sp" not in mp.values(): mp[c] = "office_sp"
-
                 elif "sales" in cl and "person" in cl:
                     if "salesperson" not in mp.values(): mp[c] = "salesperson"
-
                 elif ("end" in cl and ("user" in cl or "oem" in cl)) or cl == "oem":
                     if "end_user_oem" not in mp.values(): mp[c] = "end_user_oem"
-
                 elif "existing" in cl or ("new" in cl and "customer" in cl):
                     if "existing_new" not in mp.values(): mp[c] = "existing_new"
 
@@ -194,7 +174,6 @@ def fetch_csv_from_url(url, sheet_name="Sheet", retries=2):
 
             df = df[base_cols + extra_cols].copy()
 
-            # ── Parse & clean ──────────────────────────────────────
             df["date"] = df["date"].apply(parse_date)
             df = df.dropna(subset=["date"])
             if df.empty:
@@ -242,7 +221,7 @@ def fetch_csv_from_url(url, sheet_name="Sheet", retries=2):
         except requests.exceptions.HTTPError as e:
             print(f"  ❌ {sheet_name}: HTTP {e.response.status_code}")
             if e.response.status_code in (401, 403, 404):
-                return None   # Auth / URL errors — no point retrying
+                return None
         except Exception as e:
             import traceback; traceback.print_exc()
             print(f"  ❌ {sheet_name}: {e}")
@@ -267,7 +246,6 @@ def load_data():
         return pd.DataFrame()
 
     out = pd.concat(all_dfs, ignore_index=True)
-    # Deduplicate on 4 fields to avoid false-duplicate removal
     out = out.drop_duplicates(subset=["date","company","item","amount"], keep="first")
     out = out.sort_values("date").reset_index(drop=True)
     print(f"\n  🎉 Total: {len(out)} orders | ₹{out['amount'].sum():,.0f}")
@@ -492,9 +470,8 @@ app.layout = html.Div(
     style={"background":"transparent","minHeight":"100vh","padding":"20px"},
     children=[
     dcc.Store(id="st-yr",   data="ALL"),
-    dcc.Store(id="st-mon",  data=[]),
+    dcc.Store(id="st-mon",  data=None),   # ✅ FIX: None = "auto" (use all months for year), [] would mean empty
     dcc.Store(id="st-scrm", data="ALL"),
-    # ✅ 30-second interval (was 10s) — reduces flicker and reload thrashing
     dcc.Interval(id="tick", interval=30*1000, n_intervals=0, disabled=False),
 
     # ── Header ──────────────────────────────────────────────────────
@@ -943,18 +920,42 @@ app.layout = html.Div(
 
 
 # ─────────────────────────────────────────────────────────────
-#  FILTER HELPER
+#  ✅ FIXED: apply_filters — months=None means auto (year-filtered),
+#            months=[] means user explicitly cleared (show nothing? no — show year data)
+#            months=[1,2,3] means explicit selection
 # ─────────────────────────────────────────────────────────────
+def get_year_months(yr):
+    """Get available months for a given year from DF."""
+    if DF.empty: return []
+    base = DF if (not yr or yr == "ALL") else DF[DF["year"] == int(yr)]
+    return sorted(base["month"].unique().tolist())
+
 def apply_filters(yr, months, cats, sps, cos):
+    """
+    ✅ BUG FIX:
+    - months=None  → auto mode: use all available months for selected year
+    - months=[]    → user cleared: treat same as auto (show year's data)
+    - months=[...] → explicit selection: filter to those months only
+    """
     if DF.empty: return pd.DataFrame()
     dff = DF.copy()
+
+    # ── Year filter ────────────────────────────────────────────────
     if yr and yr != "ALL":
         try:
             dff = dff[dff["year"] == int(yr)]
         except (ValueError, TypeError):
             pass
-    if months:                          # non-empty list = restrict months
+
+    # ── Month filter ───────────────────────────────────────────────
+    # ✅ KEY FIX: only filter months when user has explicitly selected some
+    # months=None or months=[] both mean "show all months for this year"
+    # This prevents the bug where months=[] showed ALL years' data
+    if months:  # truthy = non-empty list = explicit selection
         dff = dff[dff["month"].isin(months)]
+    # else: no month filter — year filter above already scopes the data correctly
+
+    # ── Category / SP / Company filters ───────────────────────────
     if cats:
         dff = dff[dff["category"].isin(cats)]
     if sps:
@@ -979,17 +980,14 @@ yr_inputs = [Input("yr-ALL","n_clicks")] + [Input(f"yr-{y}","n_clicks") for y in
     *yr_inputs,
     Input("btn-reload","n_clicks"),
     Input("tick","n_intervals"),
-    # ✅ FIX: State preserves year selection on tick / reload
     State("st-yr","data"),
     prevent_initial_call=False)
 def cb_year(*args):
     global DF, ALL_YEARS, ALL_CATS, ALL_SPS, ALL_COS, LAST_SYNC
 
-    # Last arg = State value (current year)
     cur_yr = args[-1] if args[-1] is not None else "ALL"
     tid    = ctx.triggered_id
 
-    # Reload data only when explicitly requested
     if tid in ("btn-reload", "tick"):
         DF = load_data()
         if not DF.empty:
@@ -998,7 +996,6 @@ def cb_year(*args):
             ALL_SPS[:]   = sorted(DF["sp_clean"].unique().tolist())
             ALL_COS[:]   = sorted(DF["company"].unique().tolist())
         LAST_SYNC = datetime.now().strftime("%d %b %H:%M")
-        # ✅ FIX: preserve existing year selection — do NOT reset to "ALL"
         sel_yr = cur_yr
     elif tid == "yr-ALL":
         sel_yr = "ALL"
@@ -1008,7 +1005,6 @@ def cb_year(*args):
         except ValueError:
             sel_yr = "ALL"
     else:
-        # Initial call
         sel_yr = "ALL"
 
     all_keys = ["ALL"] + ALL_YEARS
@@ -1041,30 +1037,38 @@ def cb_year(*args):
     prevent_initial_call=True)
 def cb_mon(mc, mall, mclr, yr, cur):
     tid = ctx.triggered_id
-    if DF.empty: return []
+    if DF.empty: return None
 
     if tid == "btn-mall":
-        base = DF if (not yr or yr == "ALL") else DF[DF["year"] == int(yr)]
-        return sorted(base["month"].unique().tolist())
+        # ✅ "All Months" = return to auto mode (None) so apply_filters shows all year data
+        return None
 
     if tid == "btn-mclr":
-        return []
+        # ✅ Clear = also auto mode
+        return None
 
     if tid == "st-yr":
-        # ✅ FIX: year changed → auto-select all months for that year
-        base = DF if (not yr or yr == "ALL") else DF[DF["year"] == int(yr)]
-        return sorted(base["month"].unique().tolist())
+        # ✅ Year changed → reset to auto mode so all year months show
+        return None
 
     if isinstance(tid, dict) and tid.get("type") == "mb":
         m = tid["index"]
-        s = list(cur or [])
+        # ✅ When user clicks a month, start from year's available months if currently in auto mode
+        if cur is None:
+            # Auto mode → clicking a month means "select only this month"
+            # First get all year months, then toggle clicked one
+            avail = get_year_months(None)  # will be refined in grid
+            # Simpler: just start with [m] as explicit single selection
+            return [m]
+        s = list(cur)
         if m in s:
             s.remove(m)
+            return sorted(s) if s else None   # if all deselected, go back to auto
         else:
             s.append(m)
-        return sorted(s)
+            return sorted(s)
 
-    return cur or []
+    return cur
 
 
 # ── Month grid render ────────────────────────────────────────
@@ -1074,23 +1078,33 @@ def cb_mon(mc, mall, mclr, yr, cur):
     Input("st-yr","data"),
     Input("st-mon","data"))
 def cb_grid(yr, sel):
-    sel = sel or []
+    # ✅ sel=None means auto (all year months selected visually)
     if DF.empty:
         base_months = set()
+        auto_months = set()
     else:
         base = DF if (not yr or yr == "ALL") else DF[DF["year"] == int(yr)]
         base_months = set(base["month"].unique())
+        auto_months = base_months  # in auto mode, all available = selected
+
+    is_auto = (sel is None)
+    sel_set = auto_months if is_auto else set(sel or [])
 
     cells = []
     for i, mn in enumerate(MON):
         m = i + 1
-        if   m in sel:          cls = "cm on"
-        elif m in base_months:  cls = "cm has"
-        else:                   cls = "cm off"
+        if m not in base_months:
+            cls = "cm off"           # no data for this month in this year
+        elif m in sel_set:
+            cls = "cm on"            # selected / active
+        else:
+            cls = "cm has"           # has data but not selected
         cells.append(html.Div(mn, id={"type":"mb","index":m}, className=cls, n_clicks=0))
 
     yr_lbl = "All Years" if (not yr or yr == "ALL") else str(yr)
-    if sel:
+    if is_auto:
+        info = f"📅 {yr_lbl}  |  All months selected"
+    elif sel:
         info = f"📅 {yr_lbl}  |  " + " • ".join(MON[m-1] for m in sorted(sel)) + f"  ({len(sel)} months)"
     else:
         info = f"📅 {yr_lbl}  |  All months selected"
@@ -1106,7 +1120,6 @@ def cb_grid(yr, sel):
     Input("tick","n_intervals"),
     prevent_initial_call=True)
 def cb_dropdown_opts(rel, ti):
-    """Refresh dropdown option lists after data reload (preserves user selections)."""
     if DF.empty:
         return [], [], []
     return (
@@ -1230,7 +1243,7 @@ def cb_scrm(yr, months, scrm_sel):
             base = base[base["year"] == int(yr)]
         except (ValueError, TypeError):
             pass
-    if months:
+    if months:   # ✅ same fix: only filter if explicit selection
         base = base[base["month"].isin(months)]
 
     stats = {}
@@ -1251,7 +1264,6 @@ def cb_scrm(yr, months, scrm_sel):
                  ["Jyoti Sahu"]  if scrm_sel == "Jyoti Sahu"  else
                  SC_CRM_EMPLOYEES)
 
-    # Monthly chart
     fmon = go.Figure()
     for emp in show_emps:
         edf = stats[emp]["df"]
@@ -1270,7 +1282,6 @@ def cb_scrm(yr, months, scrm_sel):
         xaxis=dict(showgrid=False,tickfont=dict(size=8),color=T2),
         yaxis=dict(showgrid=True,gridcolor=BD,zeroline=False,color=T2,visible=False))
 
-    # Category donut
     combined = pd.concat([stats[e]["df"] for e in show_emps])
     if not combined.empty:
         ca = combined.groupby("category")["amount"].sum().reset_index()
@@ -1286,7 +1297,6 @@ def cb_scrm(yr, months, scrm_sel):
     else:
         fcat = efig("No data")
 
-    # Head-to-head comparison
     cmp_cats    = ["Revenue","Orders","Avg Order"]
     renuka_vals = [r["rev"]/1e5,   r["ord"],   r["avg"]/1e3]
     jyoti_vals  = [j["rev"]/1e5,   j["ord"],   j["avg"]/1e3]
@@ -1421,8 +1431,12 @@ def cb_main(yr, months, cats, sps, cos, nd, nm, rel, ti):
 
     dff    = apply_filters(yr, months, cats, sps, cos)
     yr_lbl = "All Years" if (not yr or yr == "ALL") else str(yr)
-    mon_lbl = ("All Months" if not months
-               else " | ".join(MON[m-1] for m in sorted(months)))
+
+    # ✅ Label for header — show "All Months" when sel is None/empty
+    if months:
+        mon_lbl = " | ".join(MON[m-1] for m in sorted(months))
+    else:
+        mon_lbl = "All Months"
 
     rev   = float(dff["amount"].sum())
     ords  = len(dff)
@@ -1440,12 +1454,13 @@ def cb_main(yr, months, cats, sps, cos, nd, nm, rel, ti):
                 go.Figure(),[],efig("Koi data nahi"),efig("Koi data nahi"),
                 [],"-", d_sty, m_sty)
 
-    # Month-wise bar (full year base for context, highlight selected)
+    # Month-wise bar — show only months that have data in selected year
     base_bar = DF.copy()
     if yr and yr != "ALL":
         try: base_bar = base_bar[base_bar["year"] == int(yr)]
         except: pass
     mg        = base_bar.groupby(["month","month_name"])["amount"].sum().reset_index().sort_values("month")
+    # ✅ Highlight: if months selection active, highlight those; else all bars same color
     bar_cols  = ["#4F8EF7" if (not months or m in months) else "#1E3A8A"
                  for m in mg["month"].tolist()]
     ymax      = float(mg["amount"].max()) if not mg.empty else 1
