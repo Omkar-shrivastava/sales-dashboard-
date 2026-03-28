@@ -1452,9 +1452,9 @@ def cb_main(yr, months, cats, sps, cos, nd, nm, rel, ti):
 
     # Highlight selected months (blue = selected, dim = not selected)
     if months:
-        bar_cols = ["#4F8EF7" if m in months else "#1E3A8A55"
+        bar_cols = ["#4F8EF7" if m in months else "#1E3A8A"
                     for m in mg["month"].tolist()]
-        bar_opac = [1.0 if m in months else 0.4
+        bar_opac = [1.0 if m in months else 0.35
                     for m in mg["month"].tolist()]
     else:
         bar_cols = ["#4F8EF7"] * len(mg)
@@ -1463,9 +1463,11 @@ def cb_main(yr, months, cats, sps, cos, nd, nm, rel, ti):
     ymax = float(mg["amount"].max()) if not mg.empty else 1
     fmon = go.Figure(go.Bar(
         x=mg["month_name"].tolist(), y=mg["amount"].tolist(),
-        marker_color=bar_cols,
-        marker_opacity=bar_opac,
-        marker_line=dict(width=0),
+        marker=dict(
+            color=bar_cols,
+            opacity=bar_opac,
+            line=dict(width=0),
+        ),
         text=[inr(v) if v > 0 else "" for v in mg["amount"].tolist()],
         textposition="inside", insidetextanchor="end",
         textfont=dict(size=9, color="#fff"),
